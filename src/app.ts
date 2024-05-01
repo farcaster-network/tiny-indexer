@@ -73,7 +73,7 @@ export class App implements MessageHandler {
 
     const startedAt = Date.now()
     if (fids.length === 0) {
-      const maxFidResult = await this.hubSubscriber.hubClient.getFids({
+      const maxFidResult = await this.hubSubscriber.hubClient!.getFids({
         pageSize: 1,
         reverse: true,
       })
@@ -104,6 +104,7 @@ export class App implements MessageHandler {
     log.info(`Starting worker...`)
     const worker = getWorker(this, app.redis.client, log, CONCURRENCY)
     await worker.run()
+    return
   }
 
   async handleMessageMerge(): Promise<void> {}
@@ -134,11 +135,5 @@ const app = App.create(POSTGRES_URL, REDIS_URL, HUB_HOST, HUB_SSL)
 
 ensureMigrations(app.db, log)
 
-const startTime = Date.now()
-
 log.info(`Starting backfill... ${POSTGRES_URL}, ${REDIS_URL}, ${HUB_HOST}, SSL:${HUB_SSL}`)
 app.backfill()
-
-const endTime = Date.now()
-
-log.info(`Backfill took ${endTime - startTime}ms`)
