@@ -5,7 +5,7 @@ import {
   isCastAddMessage,
   isCastRemoveMessage,
 } from '@farcaster/hub-nodejs'
-import { farcasterTimeToDate } from '../utils'
+import { farcasterTimeToDate } from '../src/utils.js'
 import type { Insertable } from 'kysely'
 import { db, type Tables } from '../src/db'
 import { log } from '../src/log.js'
