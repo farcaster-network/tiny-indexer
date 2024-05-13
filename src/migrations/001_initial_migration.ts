@@ -62,6 +62,7 @@ export const up = async (db: Kysely<any>) => {
   // MESSAGES -------------------------------------------------------------------------------------
   await db.schema
     .createTable('messages')
+    .ifNotExists()
     .addColumn('id', 'uuid', (col) => col.defaultTo(sql`generate_ulid()`))
     .addColumn('createdAt', 'timestamptz', (col) => col.notNull().defaultTo(sql`current_timestamp`))
     .addColumn('updatedAt', 'timestamptz', (col) => col.notNull().defaultTo(sql`current_timestamp`))
@@ -88,9 +89,39 @@ export const up = async (db: Kysely<any>) => {
     )
     .execute()
 
-  await db.schema.createIndex('messages_timestamp_index').on('messages').columns(['timestamp']).execute()
+  await db.schema.createIndex('messages_timestamp_index').on('messages').ifNotExists().columns(['timestamp']).execute()
 
-  await db.schema.createIndex('messages_fid_index').on('messages').columns(['fid']).execute()
+  await db.schema.createIndex('messages_fid_index').on('messages').ifNotExists().columns(['fid']).execute()
 
-  await db.schema.createIndex('messages_signer_index').on('messages').columns(['signer']).execute()
+  await db.schema.createIndex('messages_signer_index').on('messages').ifNotExists().columns(['signer']).execute()
+
+  // Casts -------------------------------------------------------------------------------------
+  await db.schema
+    .createTable('casts')
+    .ifNotExists()
+    .addColumn('id', 'uuid', (col) => col.defaultTo(sql`generate_ulid()`))
+    .addColumn('createdAt', 'timestamptz', (col) => col.notNull().defaultTo(sql`current_timestamp`))
+    .addColumn('updatedAt', 'timestamptz', (col) => col.notNull().defaultTo(sql`current_timestamp`))
+    .addColumn('timestamp', 'timestamptz', (col) => col.notNull())
+    .addColumn('deletedAt', 'timestamptz')
+    .addColumn('fid', 'bigint', (col) => col.notNull())
+    .addColumn('parentFid', 'bigint')
+    .addColumn('hash', 'bytea', (col) => col.notNull().unique())
+    .addColumn('rootParentHash', 'bytea')
+    .addColumn('parentHash', 'bytea')
+    .addColumn('rootParentUrl', 'text')
+    .addColumn('parentUrl', 'text')
+    .addColumn('text', 'text', (col) => col.notNull())
+    .addColumn('embeds', 'json', (col) => col.notNull().defaultTo(sql`'[]'`))
+    .addColumn('mentions', 'json', (col) => col.notNull().defaultTo(sql`'[]'`))
+    .addColumn('mentionsPositions', 'json', (col) => col.notNull().defaultTo(sql`'[]'`))
+    .execute()
+
+  await db.schema
+    .createIndex('casts_fid_timestamp_index')
+    .ifNotExists()
+    .on('casts')
+    .columns(['fid', 'timestamp'])
+    .where(sql.ref('deleted_at'), 'is', null) // Only index active (non-deleted) casts
+    .execute()
 }

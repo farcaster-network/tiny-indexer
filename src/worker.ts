@@ -2,11 +2,10 @@ import { Redis } from 'ioredis'
 import { Job, Queue, Worker } from 'bullmq'
 import { App } from './app'
 import { pino } from 'pino'
-import type { SingleBar } from 'cli-progress'
 
 const QUEUE_NAME = 'default'
 
-export function getWorker(app: App, redis: Redis, log: pino.Logger, concurrency = 1) {
+export function newWorker(app: App, redis: Redis, log: pino.Logger, concurrency = 1) {
   const worker = new Worker(
     QUEUE_NAME,
     async (job: Job) => {
@@ -39,8 +38,8 @@ export function getWorker(app: App, redis: Redis, log: pino.Logger, concurrency 
   return worker
 }
 
-export function getQueue(redis: Redis) {
-  return new Queue('default', {
+export function newQueue(redis: Redis, name: string) {
+  return new Queue(name, {
     connection: redis,
     defaultJobOptions: {
       attempts: 3,
