@@ -28,11 +28,13 @@ const hubId = 'shuttle'
 export class App implements MessageHandler {
   private static instance: App | null = null
   public redis: RedisClient
-  // public backfillQueue: Queue
+  public backfillQueue: Queue
   private hubSubscriber: HubSubscriber
   private streamConsumer: HubEventStreamConsumer
   public readonly db: DB
   private readonly hubId: string
+
+  public QUEUE_NAME = 'backfill'
 
   private constructor(
     db: DB,
@@ -45,7 +47,7 @@ export class App implements MessageHandler {
     this.hubSubscriber = hubSubscriber
     this.hubId = hubId
     this.streamConsumer = streamConsumer
-    // this.backfillQueue = newQueue(redis.client, 'backfill')
+    this.backfillQueue = newQueue(redis.client, this.QUEUE_NAME)
   }
 
   public static async getInstance(
@@ -55,6 +57,8 @@ export class App implements MessageHandler {
     hubSSL: boolean = false
   ): Promise<App> {
     if (!App.instance) {
+      log.info(`Starting app... ${dbUrl}, ${redisUrl}, ${hubUrl}, SSL:${hubSSL}`)
+
       const [db, redis, hub] = await Promise.all([
         getDbClient(dbUrl),
         RedisClient.create(redisUrl),
@@ -75,7 +79,7 @@ export class App implements MessageHandler {
   }
 
   async stream() {
-    log.info(`Starting stream... ${POSTGRES_URL}, ${REDIS_URL}, ${HUB_HOST}, SSL:${HUB_SSL}`)
+    log.info('Starting stream...')
 
     // Hub subscriber listens to events from the hub and writes them to a redis stream.
     await this.hubSubscriber.start()
@@ -91,44 +95,47 @@ export class App implements MessageHandler {
     })
   }
 
-  // async backfill() {
-  //   log.info(`Starting backfill... ${POSTGRES_URL}, ${REDIS_URL}, ${HUB_HOST}, SSL:${HUB_SSL}`)
-  //   const fids = BACKFILL_FIDS ? BACKFILL_FIDS.split(',').map((fid) => parseInt(fid)) : []
+  async backfill() {
+    log.info('Starting backfill...')
+    const fids = BACKFILL_FIDS ? BACKFILL_FIDS.split(',').map((fid) => parseInt(fid)) : []
 
-  //   const startedAt = Date.now()
-  //   if (fids.length === 0) {
-  //     const maxFidResult = await this.hubSubscriber.hubClient!.getFids({
-  //       pageSize: 1,
-  //       reverse: true,
-  //     })
-  //     if (maxFidResult.isErr()) {
-  //       log.error('Failed to get max fid', maxFidResult.error)
-  //       throw maxFidResult.error
-  //     }
-  //     const maxFid = MAX_FID ? parseInt(MAX_FID) : maxFidResult.value.fids[0]
-  //     if (!maxFid) {
-  //       log.error('Max fid was undefined')
-  //       throw new Error('Max fid was undefined')
-  //     }
-  //     log.info(`Queuing up fids upto: ${maxFid}`)
-  //     // create an array of arrays in batches of 100 up to maxFid
-  //     const batchSize = 10
-  //     const fids = Array.from({ length: Math.ceil(maxFid / batchSize) }, (_, i) => i * batchSize).map((fid) => fid + 1)
-  //     for (const start of fids) {
-  //       const subset = Array.from({ length: batchSize }, (_, i) => start + i)
-  //       await this.backfillQueue.add('reconcile', { fids: subset })
-  //     }
-  //   } else {
-  //     await this.backfillQueue.add('reconcile', { fids })
-  //   }
+    const startedAt = Date.now()
+    if (fids.length === 0) {
+      const maxFidResult = await this.hubSubscriber.hubClient!.getFids({
+        pageSize: 1,
+        reverse: true,
+      })
+      if (maxFidResult.isErr()) {
+        log.error('Failed to get max fid', maxFidResult.error)
+        throw maxFidResult.error
+      }
+      const maxFid = MAX_FID ? parseInt(MAX_FID) : maxFidResult.value.fids[0]
+      if (!maxFid) {
+        log.error('Max fid was undefined')
+        throw new Error('Max fid was undefined')
+      }
+      log.info(`Queuing fids up to: ${maxFid}`)
+      // create an array of arrays in batches of 100 up to maxFid
+      const batchSize = 10
+      const fids = Array.from({ length: Math.ceil(maxFid / batchSize) }, (_, i) => i * batchSize).map((fid) => fid + 1)
+      for (const start of fids) {
+        const subset = Array.from({ length: batchSize }, (_, i) => start + i)
+        await this.backfillQueue.add('backfillFID', { fids: subset })
+      }
+    } else {
+      await this.backfillQueue.add('backfillFID', { fids })
+    }
 
-  //   await this.backfillQueue.add('completionMarker', { startedAt })
-  //   log.info('Backfill jobs queued')
+    log.info('Backfill jobs queued')
 
-  //   log.info(`Starting worker...`)
-  //   await newWorker(this, app.redis.client, log, CONCURRENCY).run()
-  //   return
-  // }
+    // After the FIDs are queued, we add a marker to the end of the queue
+    // so the worker knows when to start processing the stream
+    await this.backfillQueue.add('backfillCompleted', { startedAt })
+
+    log.info(`Starting worker...`)
+    await newWorker(this, app.redis.client, log, CONCURRENCY).run()
+    return
+  }
 
   async handleMessageMerge(
     message: Message,
@@ -175,5 +182,6 @@ export class App implements MessageHandler {
 
 const app = await App.getInstance(POSTGRES_URL, REDIS_URL, HUB_HOST, HUB_SSL)
 
-// await app.backfill()
-await app.stream()
+await app.backfill()
+console.log('here')
+// await app.stream()

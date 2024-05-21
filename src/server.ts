@@ -18,8 +18,8 @@ export async function startServer() {
   serverAdapter.setBasePath('/')
   _server.use('/', serverAdapter.getRouter())
 
-  // createBullBoard({
-  //   queues: [new BullMQAdapter(app.backfillQueue)],
-  //   serverAdapter,
-  // })
+  createBullBoard({
+    queues: [new BullMQAdapter(app.backfillQueue)],
+    serverAdapter,
+  })
 }
