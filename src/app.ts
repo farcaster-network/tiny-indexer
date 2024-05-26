@@ -20,7 +20,7 @@ import { ok } from 'neverthrow'
 import { newQueue, newWorker } from './worker'
 import { ensureMigrations } from './db'
 import { deleteCast, insertCast } from '../lib/casts'
-import type { Queue } from 'bullmq'
+import { Job, Queue, Worker } from 'bullmq'
 import { startServer } from './server'
 
 const hubId = 'shuttle'
@@ -34,8 +34,6 @@ export class App implements MessageHandler {
   public readonly db: DB
   private readonly hubId: string
 
-  public QUEUE_NAME = 'backfill'
-
   private constructor(
     db: DB,
     redis: RedisClient,
@@ -47,7 +45,7 @@ export class App implements MessageHandler {
     this.hubSubscriber = hubSubscriber
     this.hubId = hubId
     this.streamConsumer = streamConsumer
-    this.backfillQueue = newQueue(redis.client, this.QUEUE_NAME)
+    this.backfillQueue = newQueue(redis.client, 'backfill')
   }
 
   public static async getInstance(
@@ -73,15 +71,17 @@ export class App implements MessageHandler {
       App.instance = new App(db, redis, hubSubscriber, streamConsumer)
 
       await ensureMigrations(App.instance.db, log)
+
       startServer()
     }
+
     return App.instance
   }
 
   async stream() {
     log.info('Starting stream...')
 
-    // Hub subscriber listens to events from the hub and writes them to a redis stream.
+    // // Hub subscriber listens to events from the hub and writes them to a redis stream.
     await this.hubSubscriber.start()
 
     // Sleep 10 seconds to give the subscriber a chance to create the stream for the first time.
@@ -126,15 +126,15 @@ export class App implements MessageHandler {
       await this.backfillQueue.add('backfillFID', { fids })
     }
 
-    log.info('Backfill jobs queued')
+    const worker = newWorker(this, app.redis.client, log, CONCURRENCY)
 
-    // After the FIDs are queued, we add a marker to the end of the queue
-    // so the worker knows when to start processing the stream
-    await this.backfillQueue.add('backfillCompleted', { startedAt })
+    worker.on('completed', async (job: Job) => {
+      if ((await this.backfillQueue.getActiveCount()) === 0 && (await this.backfillQueue.getWaitingCount()) === 0) {
+        log.info(`Backfill completed in ${(Date.now() - startedAt) / 1000}s`)
 
-    log.info(`Starting worker...`)
-    await newWorker(this, app.redis.client, log, CONCURRENCY).run()
-    return
+        this.stream()
+      }
+    })
   }
 
   async handleMessageMerge(
@@ -183,5 +183,3 @@ export class App implements MessageHandler {
 const app = await App.getInstance(POSTGRES_URL, REDIS_URL, HUB_HOST, HUB_SSL)
 
 await app.backfill()
-console.log('here')
-// await app.stream()
