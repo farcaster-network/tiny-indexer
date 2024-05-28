@@ -78,7 +78,7 @@ export class App implements MessageHandler {
     return App.instance
   }
 
-  async sync() {
+  async start() {
     const startedAt = Date.now()
     backfill(this, log)
 
@@ -133,4 +133,4 @@ export class App implements MessageHandler {
 
 const app = await App.getInstance(POSTGRES_URL, REDIS_URL, HUB_HOST, HUB_SSL)
 
-await app.sync()
+await app.start()
