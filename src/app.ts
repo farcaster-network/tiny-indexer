@@ -13,15 +13,15 @@ import {
   type StoreMessageOperation,
   type MessageState,
 } from '@farcaster/shuttle'
-import { bytesToHexString, Message, isCastAddMessage, isCastRemoveMessage } from '@farcaster/hub-nodejs'
-import { BACKFILL_FIDS, CONCURRENCY, HUB_HOST, HUB_SSL, MAX_FID, POSTGRES_URL, REDIS_URL } from './env'
+import { bytesToHexString, Message } from '@farcaster/hub-nodejs'
+import { HUB_HOST, HUB_SSL, POSTGRES_URL, REDIS_URL } from './env'
 import { log } from './log'
-import { ok } from 'neverthrow'
-import { newQueue, newWorker } from './worker'
+import { newQueue } from './worker'
 import { ensureMigrations } from './db'
-import { deleteCast, insertCast } from '../lib/casts'
-import { Job, Queue, Worker } from 'bullmq'
-import { startServer } from './server'
+import { startMonitoringServer } from './server'
+import backfill from './backfill'
+import stream from './stream'
+import type { Queue } from 'bullmq'
 
 const hubId = 'shuttle'
 
@@ -29,8 +29,8 @@ export class App implements MessageHandler {
   private static instance: App | null = null
   public redis: RedisClient
   public backfillQueue: Queue
-  private hubSubscriber: HubSubscriber
-  private streamConsumer: HubEventStreamConsumer
+  public hubSubscriber: HubSubscriber
+  public streamConsumer: HubEventStreamConsumer
   public readonly db: DB
   private readonly hubId: string
 
@@ -72,69 +72,24 @@ export class App implements MessageHandler {
 
       await ensureMigrations(App.instance.db, log)
 
-      startServer()
+      startMonitoringServer()
     }
 
     return App.instance
   }
 
-  async stream() {
-    log.info('Starting stream...')
-
-    // // Hub subscriber listens to events from the hub and writes them to a redis stream.
-    await this.hubSubscriber.start()
-
-    // Sleep 10 seconds to give the subscriber a chance to create the stream for the first time.
-    // TODO: there has to be a better way to do this
-    await new Promise((resolve) => setTimeout(resolve, 10_000))
-
-    // Stream consumer reads from the redis stream and inserts them into postgres
-    await this.streamConsumer.start(async (hubEvent) => {
-      await HubEventProcessor.processHubEvent(this.db, hubEvent, this)
-      return ok({ skipped: false })
-    })
-  }
-
-  async backfill() {
-    log.info('Starting backfill...')
-    const fids = BACKFILL_FIDS ? BACKFILL_FIDS.split(',').map((fid) => parseInt(fid)) : []
-
+  async sync() {
     const startedAt = Date.now()
-    if (fids.length === 0) {
-      const maxFidResult = await this.hubSubscriber.hubClient!.getFids({
-        pageSize: 1,
-        reverse: true,
-      })
-      if (maxFidResult.isErr()) {
-        log.error('Failed to get max fid', maxFidResult.error)
-        throw maxFidResult.error
-      }
-      const maxFid = MAX_FID ? parseInt(MAX_FID) : maxFidResult.value.fids[0]
-      if (!maxFid) {
-        log.error('Max fid was undefined')
-        throw new Error('Max fid was undefined')
-      }
-      log.info(`Queuing fids up to: ${maxFid}`)
-      // create an array of arrays in batches of 100 up to maxFid
-      const batchSize = 10
-      const fids = Array.from({ length: Math.ceil(maxFid / batchSize) }, (_, i) => i * batchSize).map((fid) => fid + 1)
-      for (const start of fids) {
-        const subset = Array.from({ length: batchSize }, (_, i) => start + i)
-        await this.backfillQueue.add('backfillFID', { fids: subset })
-      }
-    } else {
-      await this.backfillQueue.add('backfillFID', { fids })
+    backfill(this, log)
+
+    const queueIsEmpty =
+      (await this.backfillQueue.getActiveCount()) === 0 && (await this.backfillQueue.getWaitingCount()) === 0
+
+    if (queueIsEmpty) {
+      log.info(`Backfill completed in ${(Date.now() - startedAt) / 1000}s`)
+
+      stream(this, log)
     }
-
-    const worker = newWorker(this, app.redis.client, log, CONCURRENCY)
-
-    worker.on('completed', async (job: Job) => {
-      if ((await this.backfillQueue.getActiveCount()) === 0 && (await this.backfillQueue.getWaitingCount()) === 0) {
-        log.info(`Backfill completed in ${(Date.now() - startedAt) / 1000}s`)
-
-        this.stream()
-      }
-    })
   }
 
   async handleMessageMerge(
@@ -145,18 +100,14 @@ export class App implements MessageHandler {
     isNew: boolean,
     wasMissed: boolean
   ): Promise<void> {
-    if (!isNew) return
-
-    if (isCastAddMessage(message) || isCastRemoveMessage(message)) {
-      if (state === 'created') {
-        await insertCast(message)
-      } else if (state === 'deleted') {
-        await deleteCast(message)
-      }
-    }
-
-    const description = wasMissed ? `missed message (${operation})` : `message (${operation})`
-    log.info(`${state} ${description} ${bytesToHexString(message.hash)._unsafeUnwrap()} (type ${message.data?.type})`)
+    // if (!isNew) return
+    // if (isCastAddMessage(message) || isCastRemoveMessage(message)) {
+    //   if (state === 'created') {
+    //     await insertCast(message)
+    //   } else if (state === 'deleted') {
+    //     await deleteCast(message)
+    //   }
+    // }
   }
 
   async reconcileFids(fids: number[]) {
@@ -182,4 +133,4 @@ export class App implements MessageHandler {
 
 const app = await App.getInstance(POSTGRES_URL, REDIS_URL, HUB_HOST, HUB_SSL)
 
-await app.backfill()
+await app.sync()
