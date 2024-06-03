@@ -23,8 +23,6 @@ import backfill from './backfill'
 import stream from './stream'
 import type { Queue } from 'bullmq'
 
-const hubId = 'shuttle'
-
 export class App implements MessageHandler {
   private static instance: App | null = null
   public redis: RedisClient
@@ -32,7 +30,6 @@ export class App implements MessageHandler {
   public hubSubscriber: HubSubscriber
   public streamConsumer: HubEventStreamConsumer
   public readonly db: DB
-  private readonly hubId: string
 
   private constructor(
     db: DB,
@@ -43,7 +40,6 @@ export class App implements MessageHandler {
     this.db = db
     this.redis = redis
     this.hubSubscriber = hubSubscriber
-    this.hubId = hubId
     this.streamConsumer = streamConsumer
     this.backfillQueue = newQueue(redis.client, 'backfill')
   }
@@ -80,16 +76,22 @@ export class App implements MessageHandler {
 
   async start() {
     const startedAt = Date.now()
-    backfill(this, log)
+    // await backfill(this, log)
 
-    const queueIsEmpty =
-      (await this.backfillQueue.getActiveCount()) === 0 && (await this.backfillQueue.getWaitingCount()) === 0
+    log.info(`Backfill completed in ${(Date.now() - startedAt) / 1000}s`)
 
-    if (queueIsEmpty) {
-      log.info(`Backfill completed in ${(Date.now() - startedAt) / 1000}s`)
+    const checkQueueAndStartStream = async () => {
+      const activeCount = await this.backfillQueue.getActiveCount()
+      const waitingCount = await this.backfillQueue.getWaitingCount()
 
-      stream(this, log)
+      if (activeCount === 0 && waitingCount === 0) {
+        stream(this, log)
+      } else {
+        setTimeout(checkQueueAndStartStream, 10000) // Check every ten seconds
+      }
     }
+
+    checkQueueAndStartStream()
   }
 
   async handleMessageMerge(
@@ -113,6 +115,7 @@ export class App implements MessageHandler {
   async reconcileFids(fids: number[]) {
     const reconciler = new MessageReconciliation(this.hubSubscriber.hubClient!, this.db, log)
     for (const fid of fids) {
+      const start = Date.now()
       await reconciler.reconcileMessagesForFid(fid, async (message, missingInDb, prunedInDb, revokedInDb) => {
         if (missingInDb) {
           await HubEventProcessor.handleMissingMessage(this.db, message, this)
@@ -121,13 +124,9 @@ export class App implements MessageHandler {
           log.info(`Reconciled ${messageDesc} message ${bytesToHexString(message.hash)._unsafeUnwrap()}`)
         }
       })
+      const elapsed = Date.now() - start
+      log.info(`Reconciliation for FID ${fid} took ${elapsed}ms`)
     }
-  }
-
-  async stop() {
-    this.hubSubscriber.stop()
-    const lastEventId = await this.redis.getLastProcessedEvent(this.hubId)
-    log.info(`Stopped at eventId: ${lastEventId}`)
   }
 }
 
